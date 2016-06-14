@@ -15,7 +15,24 @@ use multipart::client::Multipart;
 use std::io::{stderr, Write, Read};
 use std::path::PathBuf;
 use std::sync::mpsc::channel;
+use std::sync::mpsc::Sender;
 use threadpool::ThreadPool;
+
+trait UnwrapOrSend<T, E> {
+        fn unwrap_or_send(self, sender: &Sender<Result<(), ()>>) -> T;
+}
+
+impl<T, E> UnwrapOrSend<T, E> for Result<T, E> {
+    fn unwrap_or_send(self, sender: &Sender<Result<(),()>>) -> T {
+        match self {
+            Ok(val) => val,
+            Err(_) => {
+                let _ = sender.send(Err(()));
+                panic!();
+            },
+        }
+    }
+}
 
 fn is_number(n: String) -> Result<(), String> {
     match n.parse::<usize>() {
@@ -36,8 +53,7 @@ fn upload_files(files: Vec<PathBuf>, concurrent: usize, verbose: bool) {
     }
 
     let pool = ThreadPool::new(concurrent);
-    let (tx, rx) = channel();
-    let mut threadcount: usize = 0;
+    let (tx, rx) = channel::<Result<(), ()>>();
 
     for file in &files {
         let file = file.clone();
@@ -45,32 +61,37 @@ fn upload_files(files: Vec<PathBuf>, concurrent: usize, verbose: bool) {
         pool.execute(move|| {
             if verbose {
                 let _ = stderr()
-                    .write(format!("Uploading {}\n", &file.display()).as_bytes())
-                    .unwrap();
+                    .write(format!("Uploading {}\n", &file.display()).as_bytes());
             }
 
             let request =
                 Request::new(Method::Post,
-                Url::parse("https://api.teknik.io/v1/Upload").unwrap())
-                .unwrap();
+                Url::parse("https://api.teknik.io/v1/Upload").unwrap_or_send(&tx))
+                .unwrap_or_send(&tx);
 
-            let mut multipart = Multipart::from_request(request).unwrap();
-            let _ = multipart.write_file("file", &file).unwrap();
-            let mut response: Response = multipart.send().unwrap();
+            let mut multipart = Multipart::from_request(request).unwrap_or_send(&tx);
+
+            let _ = multipart.write_file("file", &file).unwrap_or_send(&tx);
+            let mut response: Response = multipart.send().unwrap_or_send(&tx);
 
             let mut reply = String::new();
-            let _ = response.read_to_string(&mut reply).unwrap();
+            let _ = response.read_to_string(&mut reply).unwrap_or_send(&tx);
 
             if let StatusCode::Ok = response.status {
                 println!("{}\n", reply);
             }
 
-            let _ = tx.send(threadcount);
-            threadcount += 1;
+            let _ = &tx.send(Ok(()));
         });
     }
 
-    rx.iter().take(files.len()).fold(0, |a, b| a + b);
+    let mut counter: usize = 0;
+    for _ in rx {
+        counter += 1;
+        if counter == files.len() {
+            break
+        }
+    }
 }
 
 fn main() {
