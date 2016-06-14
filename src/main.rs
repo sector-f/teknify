@@ -14,26 +14,10 @@ use hyper::Url;
 use multipart::client::Multipart;
 use std::io::{stderr, Write, Read};
 use std::path::PathBuf;
-use std::sync::mpsc::{channel, Sender};
+use std::sync::mpsc::channel;
 use threadpool::ThreadPool;
 
-trait UnwrapOrSend<T, E> {
-        fn unwrap_or_send(self, sender: &Sender<Result<(), ()>>) -> T;
-}
-
-impl<T, E> UnwrapOrSend<T, E> for Result<T, E> {
-    fn unwrap_or_send(self, sender: &Sender<Result<(),()>>) -> T {
-        match self {
-            Ok(val) => val,
-            Err(_) => {
-                let _ = sender.send(Err(()));
-                panic!();
-            },
-        }
-    }
-}
-
-fn is_number(n: String) -> Result<(), String> {
+fn is_positive_int(n: String) -> Result<(), String> {
     match n.parse::<usize>() {
         Ok(val) => {
             if val == 0 {
@@ -42,7 +26,7 @@ fn is_number(n: String) -> Result<(), String> {
                 Ok(())
             }
         },
-        Err(_) => Err(String::from("CONCURRENT UPLOADS must be an integer")),
+        Err(_) => Err(String::from("CONCURRENT UPLOADS must be a positive integer")),
     }
 }
 
@@ -58,38 +42,36 @@ fn upload_files(files: Vec<PathBuf>, concurrent: usize, verbose: bool) {
         let file = file.clone();
         let tx = tx.clone();
         pool.execute(move|| {
+            let _ = tx;
+
             if verbose {
-                let _ = stderr()
-                    .write(format!("Uploading {}\n", &file.display()).as_bytes());
+                let _ = writeln!(stderr(), "Uploading {}", &file.display());
             }
 
             let request =
                 Request::new(Method::Post,
-                Url::parse("https://api.teknik.io/v1/Upload").unwrap_or_send(&tx))
-                .unwrap_or_send(&tx);
+                Url::parse("https://api.teknik.io/v1/Upload").unwrap())
+                .unwrap();
 
-            let mut multipart = Multipart::from_request(request).unwrap_or_send(&tx);
+            let mut multipart = Multipart::from_request(request).unwrap();
 
-            let _ = multipart.write_file("file", &file).unwrap_or_send(&tx);
-            let mut response: Response = multipart.send().unwrap_or_send(&tx);
+            let _ = multipart.write_file("file", &file).unwrap();
+            let mut response: Response = multipart.send().unwrap();
 
             let mut reply = String::new();
-            let _ = response.read_to_string(&mut reply).unwrap_or_send(&tx);
+            let _ = response.read_to_string(&mut reply).unwrap();
 
             if let StatusCode::Ok = response.status {
                 println!("{}\n", reply);
             }
-
-            let _ = &tx.send(Ok(()));
         });
     }
+    drop(tx);
 
     let mut counter: usize = 0;
-    for _ in rx {
+    while counter < files.len() {
+        let _ = rx.recv();
         counter += 1;
-        if counter == files.len() {
-            break
-        }
     }
 }
 
@@ -109,7 +91,7 @@ fn main() {
         .arg(Arg::with_name("concurrent")
              .short("c")
              .long("concurrent")
-             .validator(is_number)
+             .validator(is_positive_int)
              .value_name("CONCURRENT UPLOADS")
              .help("Sets the number of concurrent uploads. The default is equal to the number of CPU processors of the current machine")
              .takes_value(true))
