@@ -14,8 +14,7 @@ use hyper::Url;
 use multipart::client::Multipart;
 use std::io::{stderr, Write, Read};
 use std::path::PathBuf;
-use std::sync::mpsc::channel;
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{channel, Sender};
 use threadpool::ThreadPool;
 
 trait UnwrapOrSend<T, E> {
@@ -96,7 +95,7 @@ fn upload_files(files: Vec<PathBuf>, concurrent: usize, verbose: bool) {
 
 fn main() {
     let matches = App::new("teknify")
-        .about("Uploads files to websites")
+        .about("Uploads files to u.teknik.io")
         .version("0.1.0")
         .arg(Arg::with_name("file")
              .help("The file(s) that you would like to upload")
