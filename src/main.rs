@@ -28,6 +28,12 @@ impl From<serde_json::error::Error> for MyError {
     }
 }
 
+#[derive(Clone, Debug)]
+enum Output {
+    Json,
+    Url,
+}
+
 fn is_positive_int(n: String) -> Result<(), String> {
     match n.parse::<usize>() {
         Ok(val) => {
@@ -53,7 +59,7 @@ fn parse_json(name: &Path, reply: &str) -> Result<(), MyError> {
     Ok(())
 }
 
-fn upload_files(files: Vec<PathBuf>, concurrent: usize, verbose: bool, json: bool) {
+fn upload_files(files: Vec<PathBuf>, concurrent: usize, verbose: bool, output_mode: Output) {
     if verbose {
         println!("Concurrent uploads: {}", concurrent);
     }
@@ -64,6 +70,8 @@ fn upload_files(files: Vec<PathBuf>, concurrent: usize, verbose: bool, json: boo
     for file in &files {
         let file = file.clone();
         let tx = tx.clone();
+        let output_mode = output_mode.clone();
+
         pool.execute(move|| {
             let _ = tx;
 
@@ -85,10 +93,9 @@ fn upload_files(files: Vec<PathBuf>, concurrent: usize, verbose: bool, json: boo
             let _ = response.read_to_string(&mut reply).unwrap();
 
             if let StatusCode::Ok = response.status {
-                if json {
-                    println!("{}", reply);
-                } else {
-                    let _ = parse_json(&file, &reply);
+                match output_mode {
+                    Output::Json => println!("{}", reply),
+                    Output::Url => { let _ = parse_json(&file, &reply); },
                 }
             }
         });
@@ -139,7 +146,10 @@ fn main() {
 
     let verbose = matches.is_present("verbose");
 
-    let json = matches.is_present("json");
+    let output_mode = match matches.is_present("json") {
+        true => Output::Json,
+        false => Output::Url,
+    };
 
-    upload_files(files_vec, concurrent_uploads, verbose, json);
+    upload_files(files_vec, concurrent_uploads, verbose, output_mode);
 }
