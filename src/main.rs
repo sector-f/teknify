@@ -2,6 +2,7 @@ extern crate clap;
 extern crate hyper;
 extern crate multipart;
 extern crate num_cpus;
+extern crate serde_json;
 extern crate threadpool;
 extern crate url;
 
@@ -12,10 +13,20 @@ use hyper::client::response::Response;
 use hyper::status::StatusCode;
 use hyper::Url;
 use multipart::client::Multipart;
+use serde_json::Value;
 use std::io::{stderr, Write, Read};
-use std::path::PathBuf;
+use std::path::{PathBuf, Path};
 use std::sync::mpsc::channel;
 use threadpool::ThreadPool;
+
+#[derive(Clone)]
+struct MyError(String);
+
+impl From<serde_json::error::Error> for MyError {
+    fn from(_err: serde_json::error::Error) -> Self {
+        MyError(String::from("Failed to parse JSON reply"))
+    }
+}
 
 fn is_positive_int(n: String) -> Result<(), String> {
     match n.parse::<usize>() {
@@ -30,7 +41,19 @@ fn is_positive_int(n: String) -> Result<(), String> {
     }
 }
 
-fn upload_files(files: Vec<PathBuf>, concurrent: usize, verbose: bool) {
+fn parse_json(name: &Path, reply: &str) -> Result<(), MyError> {
+    let err_msg = MyError(String::from("Failed to parse JSON reply"));
+
+    let data: Value = try!(serde_json::from_str(reply));
+    let obj = try!(data.as_object().ok_or(err_msg.clone()));
+    let result = try!(obj.get("result").unwrap().as_object().ok_or(err_msg.clone()));
+    let url = try!(result.get("url").unwrap().as_string().ok_or(err_msg.clone()));
+
+    println!("{}: {}", name.display(), url);
+    Ok(())
+}
+
+fn upload_files(files: Vec<PathBuf>, concurrent: usize, verbose: bool, json: bool) {
     if verbose {
         println!("Concurrent uploads: {}", concurrent);
     }
@@ -62,7 +85,11 @@ fn upload_files(files: Vec<PathBuf>, concurrent: usize, verbose: bool) {
             let _ = response.read_to_string(&mut reply).unwrap();
 
             if let StatusCode::Ok = response.status {
-                println!("{}\n", reply);
+                if json {
+                    println!("{}", reply);
+                } else {
+                    let _ = parse_json(&file, &reply);
+                }
             }
         });
     }
@@ -95,6 +122,10 @@ fn main() {
              .value_name("CONCURRENT UPLOADS")
              .help("Sets the number of concurrent uploads. The default is equal to the number of CPU processors of the current machine")
              .takes_value(true))
+        .arg(Arg::with_name("json")
+             .short("j")
+             .long("json")
+             .help("Output full JSON reply rather than just image URL"))
         .get_matches();
 
     let files_vec = matches.values_of_os("file")
@@ -108,5 +139,7 @@ fn main() {
 
     let verbose = matches.is_present("verbose");
 
-    upload_files(files_vec, concurrent_uploads, verbose);
+    let json = matches.is_present("json");
+
+    upload_files(files_vec, concurrent_uploads, verbose, json);
 }
