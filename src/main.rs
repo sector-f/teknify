@@ -13,24 +13,36 @@ use hyper::client::response::Response;
 use hyper::status::StatusCode;
 use hyper::Url;
 use multipart::client::Multipart;
+use serde_json::error::Error;
 use serde_json::Value;
+use std::fmt;
 use std::io::{stderr, Write, Read};
 use std::path::{PathBuf, Path};
 use std::sync::mpsc::channel;
 use threadpool::ThreadPool;
 
-#[derive(Clone)]
-struct MyError(String);
+struct TeknifyError(String);
 
-impl From<serde_json::error::Error> for MyError {
-    fn from(_err: serde_json::error::Error) -> Self {
-        MyError(String::from("Failed to parse JSON reply"))
+impl fmt::Display for TeknifyError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl From<serde_json::error::Error> for TeknifyError {
+    fn from(err: serde_json::error::Error) -> Self {
+        match err {
+            Error::Syntax(syn_err, _, _) => TeknifyError(format!("Syntax error: {:?}", syn_err)),
+            Error::Io(io_err) => TeknifyError(format!("IO error: {}", io_err)),
+            Error::FromUtf8(utf_err) => TeknifyError(format!("UTF-8 error: {}", utf_err)),
+        }
     }
 }
 
 #[derive(Clone, Debug)]
 enum Output {
     Json,
+    NameAndUrl,
     Url,
 }
 
@@ -47,15 +59,19 @@ fn is_positive_int(n: String) -> Result<(), String> {
     }
 }
 
-fn parse_json(name: &Path, reply: &str) -> Result<(), MyError> {
-    let err_msg = MyError(String::from("Failed to parse JSON reply"));
+fn parse_json(name: &Path, reply: &str, showname: bool) -> Result<(), TeknifyError> {
+    let reply_as_value: Value = try!(serde_json::from_str(reply));
+    let reply_as_object = try!(reply_as_value.as_object().ok_or(TeknifyError(String::from("Response was not valid JSON"))));
+    let result_section = try!(reply_as_object.get("result").ok_or(TeknifyError(String::from("Response did not contain a \"result\" section"))));
+    let result_as_object = try!(result_section.as_object().ok_or(TeknifyError(String::from("Response's \"result\" section was not a valid JSON object"))));
+    let url_section = try!(result_as_object.get("url").ok_or(TeknifyError(String::from("Response's \"result\" section did not contain a \"url\" section"))));
+    let url = try!(url_section.as_string().ok_or(TeknifyError(String::from("Response's \"url\" section was not a valid JSON string"))));
 
-    let data: Value = try!(serde_json::from_str(reply));
-    let obj = try!(data.as_object().ok_or(err_msg.clone()));
-    let result = try!(obj.get("result").unwrap().as_object().ok_or(err_msg.clone()));
-    let url = try!(result.get("url").unwrap().as_string().ok_or(err_msg.clone()));
+    match showname {
+        true => println!("{}: {}", name.display(), url),
+        false => println!("{}", url),
+    }
 
-    println!("{}: {}", name.display(), url);
     Ok(())
 }
 
@@ -81,8 +97,8 @@ fn upload_files(files: Vec<PathBuf>, concurrent: usize, verbose: bool, output_mo
 
             let request =
                 Request::new(Method::Post,
-                Url::parse("https://api.teknik.io/v1/Upload").unwrap())
-                .unwrap();
+                Url::parse("https://api.teknik.io/v1/Upload").expect("Failed to parse \"https://api.teknik.io/v1/Upload\" as valid URL"))
+                .expect("Failed to generated http request");
 
             let mut multipart = Multipart::from_request(request).unwrap();
 
@@ -95,7 +111,18 @@ fn upload_files(files: Vec<PathBuf>, concurrent: usize, verbose: bool, output_mo
             if let StatusCode::Ok = response.status {
                 match output_mode {
                     Output::Json => println!("{}", reply),
-                    Output::Url => { let _ = parse_json(&file, &reply); },
+                    Output::NameAndUrl => {
+                        let parse_status = parse_json(&file, &reply, true);
+                        if let Err(e) = parse_status {
+                            let _ = writeln!(stderr(), "Error parsing reply for {}: {}", file.display(), e);
+                        }
+                    },
+                    Output::Url => {
+                        let parse_status = parse_json(&file, &reply, false);
+                        if let Err(e) = parse_status {
+                            let _ = writeln!(stderr(), "Error parsing reply for {}: {}", file.display(), e);
+                        }
+                    },
                 }
             }
         });
@@ -111,8 +138,8 @@ fn upload_files(files: Vec<PathBuf>, concurrent: usize, verbose: bool, output_mo
 
 fn main() {
     let matches = App::new("teknify")
-        .about("Uploads files to u.teknik.io")
-        .version("0.1.0")
+        .about("Uploads files to https://u.teknik.io")
+        .version("0.2.0")
         .arg(Arg::with_name("file")
              .help("The file(s) that you would like to upload")
              .index(1)
@@ -132,7 +159,12 @@ fn main() {
         .arg(Arg::with_name("json")
              .short("j")
              .long("json")
-             .help("Output full JSON reply rather than just image URL"))
+             .help("Output JSON reply rather than parse it"))
+        .arg(Arg::with_name("url")
+             .short("u")
+             .long("url")
+             .help("Output only the URL rather than the filename and the URL")
+             .conflicts_with("json"))
         .get_matches();
 
     let files_vec = matches.values_of_os("file")
@@ -146,9 +178,18 @@ fn main() {
 
     let verbose = matches.is_present("verbose");
 
-    let output_mode = match matches.is_present("json") {
-        true => Output::Json,
-        false => Output::Url,
+    let output_mode = {
+        if ! matches.is_present("url") && ! matches.is_present("json") {
+            Output::NameAndUrl // Default (no flags given)
+        } else {
+            if matches.is_present("url") {
+                Output::Url
+            } else if matches.is_present("json") {
+                Output::Json
+            } else {
+                unreachable!()
+            }
+        }
     };
 
     upload_files(files_vec, concurrent_uploads, verbose, output_mode);
