@@ -144,6 +144,7 @@ fn main() {
              .help("The file(s) that you would like to upload")
              .index(1)
              .multiple(true)
+             .use_delimiter(false)
              .required(true))
         .arg(Arg::with_name("verbose")
              .help("Print extra information")
